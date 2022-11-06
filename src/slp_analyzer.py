@@ -30,6 +30,31 @@ def norm_slp(temp_series):
     return slp_series
 
 
+def calc_kundenwert(start_date, end_date, start_meas, end_meas, slp_df):
+    cons = end_meas - start_meas
+    norm_slp = slp_df.loc[start_date:end_date, "norm_slp"].sum()
+    return cons / norm_slp
+
+
+def shift_date(date, days):
+    return (
+        datetime.datetime.strptime(date, "%Y%m%d") + datetime.timedelta(days=days)
+    ).strftime("%Y%m%d")
+
+
+def create_temp_forecast_df(start_date, temp_series):
+    ind = pd.date_range(start=start_date, end=shift_date(start_date, 365), freq="1d")
+    avg_temp = [
+        temp_series[
+            (temp_series.index.month == d.month)
+            & (temp_series.index.day == d.day)
+            & (temp_series.index.year > 1999)
+        ].mean()
+        for d in ind
+    ]
+    return pd.DataFrame(index=ind, data={"temp": avg_temp})
+
+
 def calc_forecast(
     temp_series,
     ref_start_date,
@@ -42,17 +67,15 @@ def calc_forecast(
     slp = norm_slp(temp_series)
     slp_df = pd.concat([temp_series, slp], axis=1)
 
-    ref_consumption = ref_end_meas - ref_start_meas
-    ref_norm_slp = slp_df.loc[ref_start_date:ref_end_date, "norm_slp"].sum()
-    ref_kundenwert = ref_consumption / ref_norm_slp
+    ref_kundenwert = calc_kundenwert(
+        ref_start_date, ref_end_date, ref_start_meas, ref_end_meas, slp_df
+    )
 
-    ref_end_date_shift = (
-        datetime.datetime.strptime(ref_end_date, "%Y%m%d") + datetime.timedelta(days=1)
-    ).strftime("%Y%m%d")
+    ref_end_date_shift = shift_date(ref_end_date, 1)
 
-    current_consumption = current_meas - ref_end_meas
-    current_norm_slp = slp_df.loc[ref_end_date_shift:current_date, "norm_slp"].sum()
-    current_kundenwert = current_consumption / current_norm_slp
+    current_kundenwert = calc_kundenwert(
+        ref_end_date_shift, current_date, ref_end_meas, current_meas, slp_df
+    )
 
     current_relative_saving = current_kundenwert / ref_kundenwert
 
@@ -60,19 +83,34 @@ def calc_forecast(
 
     consumption_df = slp_df[ref_start_date:current_date]
     consumption_df = consumption_df.rename(columns={"norm_slp": "consumption"})
-    consumption_df.loc[ref_start_date:ref_end_date, "consumption"] = (
-        consumption_df.loc[ref_start_date:ref_end_date, "consumption"] * ref_kundenwert
-    )
-    consumption_df.loc[ref_end_date_shift:current_date, "consumption"] = (
-        consumption_df.loc[ref_end_date_shift:current_date, "consumption"]
-        * current_kundenwert
+    consumption_df["kundenwert"] = ref_kundenwert
+    consumption_df.loc[ref_start_date:ref_end_date, "consumption"]
+
+    consumption_df.loc[ref_end_date:current_date, "kundenwert"] = current_kundenwert
+
+    consumption_df.loc[:, "consumption"] = (
+        consumption_df.loc[:, "consumption"] * consumption_df.loc[:, "kundenwert"]
     )
 
-    fig = consumption_df.plot()
+    forecast_df = create_temp_forecast_df(current_date, temp_series)
+    forecast_slp = norm_slp(forecast_df["temp"])
+    forecast_df = pd.concat([forecast_df, forecast_slp], axis=1)
+    forecast_df["forecast_cons_ref_kundenwert"] = (
+        forecast_df.loc[:, "norm_slp"] * ref_kundenwert
+    )
+    forecast_df["forecast_cons_current_kundenwert"] = (
+        forecast_df.loc[:, "norm_slp"] * current_kundenwert
+    )
+    forecast_df = forecast_df.drop(columns=["norm_slp"])
+    consumption_df = consumption_df.drop(columns=["kundenwert"])
+
+    df = pd.concat([consumption_df, forecast_df], axis=0)
+
+    fig = df.plot()
     fig.write_html("slp.html")
     fig.show()
 
 
 if __name__ == "__main__":
     tmp = mean_tmp("01503")
-    calc_forecast(tmp, "20211001", "20221001", "20221104", 100000, 120000, 121000)
+    calc_forecast(tmp, "20211001", "20221001", "20221104", 100000, 120000, 121500)
